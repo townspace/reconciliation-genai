@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local tooling / editor
+.claude/
+.DS_Store
+
+# Secrets — never commit API keys
+.env
+.streamlit/secrets.toml

@@ -1,0 +1,352 @@
+"""
+engines.py
+----------
+Reusable reconciliation engines. A "mini model" for a rule is mostly just
+configuration pointed at one of these engines, so all rules behave consistently.
+
+Currently implemented:
+  - transactional_recon : row-by-row match of two sources on a key
+
+Future (for summary rules like R4, R12, R14, etc.):
+  - summary_recon       : aggregate each source to a level, then compare
+"""
+
+from __future__ import annotations
+
+from typing import Dict
+
+import pandas as pd
+
+from base import DataSource, MatchStatus, ReconResult, ReconType
+
+
+def transactional_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    left: DataSource,
+    right: DataSource,
+    tolerance: float = 0.01,
+) -> ReconResult:
+    """
+    Reconcile two sources record-by-record on `recon_key`.
+
+    `left` is the primary source, `right` the secondary. Amounts are compared
+    within `tolerance` to absorb rounding noise.
+
+    Classifies every key into one of MatchStatus.
+    """
+    l = left.normalized()
+    r = right.normalized()
+    left_amt = f"{left.role}_amount"
+    right_amt = f"{right.role}_amount"
+
+    # Detect duplicate keys up front — these break a clean 1:1 join and are
+    # surfaced rather than silently aggregated.
+    dup_left = l["recon_key"][l["recon_key"].duplicated()].unique().tolist()
+    dup_right = r["recon_key"][r["recon_key"].duplicated()].unique().tolist()
+
+    merged = l.merge(r, on="recon_key", how="outer", indicator=True)
+
+    def classify(row) -> str:
+        if row["_merge"] == "left_only":
+            return MatchStatus.MISSING_IN_RIGHT.value
+        if row["_merge"] == "right_only":
+            return MatchStatus.MISSING_IN_LEFT.value
+        # present both sides
+        if abs(float(row[left_amt]) - float(row[right_amt])) <= tolerance:
+            return MatchStatus.MATCHED.value
+        return MatchStatus.AMOUNT_MISMATCH.value
+
+    merged["status"] = merged.apply(classify, axis=1)
+    merged["difference"] = merged[left_amt].fillna(0) - merged[right_amt].fillna(0)
+    merged = merged.drop(columns=["_merge"])
+    merged = merged.rename(columns={
+        left_amt: f"{left.role}_amount",
+        right_amt: f"{right.role}_amount",
+    })
+
+    breaks = merged[merged["status"] != MatchStatus.MATCHED.value].copy()
+
+    counts = merged["status"].value_counts().to_dict()
+    summary = {
+        "total_keys": int(len(merged)),
+        "matched": int(counts.get(MatchStatus.MATCHED.value, 0)),
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "missing_in_right": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "missing_in_left": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        "duplicate_keys_left": len(dup_left),
+        "duplicate_keys_right": len(dup_right),
+        f"{left.role}_total": round(float(l[left_amt].sum()), 2),
+        f"{right.role}_total": round(float(r[right_amt].sum()), 2),
+        "net_difference": round(float(merged["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id,
+        description=description,
+        recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key,
+        breaks=breaks.reset_index(drop=True),
+        detail=merged.reset_index(drop=True),
+        summary=summary,
+    )
+
+
+# ===========================================================================
+# GenAI engines
+# ===========================================================================
+# These sit alongside transactional_recon() and share the same ReconResult
+# contract, so the wrapper and rules treat them identically. They live here so
+# that adding a semantic or one-to-many rule stays a copy-configure job.
+
+from typing import List, Optional, Tuple  # noqa: E402
+from itertools import combinations          # noqa: E402
+
+from base import MATCHED_STATUSES           # noqa: E402
+
+
+def _exact_phase(left: DataSource, right: DataSource, tolerance: float):
+    """Shared first pass: outer-join on key and classify, carrying narration."""
+    l = left.normalized_with_narration()
+    r = right.normalized_with_narration()
+    left_amt = f"{left.role}_amount"
+    right_amt = f"{right.role}_amount"
+
+    merged = l.merge(r, on="recon_key", how="outer", indicator=True)
+
+    def classify(row) -> str:
+        if row["_merge"] == "left_only":
+            return MatchStatus.MISSING_IN_RIGHT.value
+        if row["_merge"] == "right_only":
+            return MatchStatus.MISSING_IN_LEFT.value
+        if abs(float(row[left_amt]) - float(row[right_amt])) <= tolerance:
+            return MatchStatus.MATCHED.value
+        return MatchStatus.AMOUNT_MISMATCH.value
+
+    merged["status"] = merged.apply(classify, axis=1)
+    merged["difference"] = merged[left_amt].fillna(0) - merged[right_amt].fillna(0)
+    merged = merged.drop(columns=["_merge"])
+    return merged, left_amt, right_amt
+
+
+def semantic_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    left: DataSource,
+    right: DataSource,
+    tolerance: float = 0.01,
+    embedder=None,
+    sim_threshold: float = 0.72,
+    amount_tolerance: Optional[float] = None,
+) -> ReconResult:
+    """
+    Feedback #1/#3 — semantic (fuzzy) matching engine.
+
+    First does the normal exact-key pass. Then, for records that remain
+    one-sided (MISSING_IN_RIGHT / MISSING_IN_LEFT), it matches them by narration
+    similarity (embeddings + cosine) when amounts also agree within
+    `amount_tolerance`. Such pairs become SEMANTIC_MATCH with a confidence equal
+    to the similarity, instead of being reported as breaks.
+
+    `amount_tolerance` defaults to `tolerance`; widen it for feeds where fees or
+    FX are expected to differ.
+    """
+    from ai.embeddings import default_embedder, cosine_sim_matrix
+
+    embedder = embedder or default_embedder()
+    amount_tolerance = tolerance if amount_tolerance is None else amount_tolerance
+
+    merged, left_amt, right_amt = _exact_phase(left, right, tolerance)
+    left_narr = f"{left.role}_narration"
+    right_narr = f"{right.role}_narration"
+
+    left_only = merged[merged["status"] == MatchStatus.MISSING_IN_RIGHT.value].copy()
+    right_only = merged[merged["status"] == MatchStatus.MISSING_IN_LEFT.value].copy()
+
+    semantic_rows: List[dict] = []
+    matched_left_idx: set = set()
+    matched_right_idx: set = set()
+
+    if len(left_only) and len(right_only):
+        lt = left_only[left_narr].fillna("").astype(str).tolist()
+        rt = right_only[right_narr].fillna("").astype(str).tolist()
+        # Embed both sides together so IDF (document frequencies) are shared,
+        # then slice — this makes distinctive tokens dominate the similarity.
+        both = embedder.embed(lt + rt)
+        sim = cosine_sim_matrix(both[:len(lt)], both[len(lt):])
+
+        l_idx = left_only.index.tolist()
+        r_idx = right_only.index.tolist()
+        l_amt = left_only[left_amt].to_numpy(dtype=float)
+        r_amt = right_only[right_amt].to_numpy(dtype=float)
+
+        # Candidate pairs above the similarity threshold AND within amount tolerance.
+        cands: List[Tuple[float, int, int]] = []
+        for i in range(len(l_idx)):
+            for j in range(len(r_idx)):
+                s = float(sim[i, j])
+                if s >= sim_threshold and abs(l_amt[i] - r_amt[j]) <= amount_tolerance:
+                    cands.append((s, i, j))
+        cands.sort(reverse=True)  # greedily take the strongest matches first
+
+        for s, i, j in cands:
+            if i in matched_left_idx or j in matched_right_idx:
+                continue
+            matched_left_idx.add(i)
+            matched_right_idx.add(j)
+            lrow = left_only.iloc[i]
+            rrow = right_only.iloc[j]
+            semantic_rows.append({
+                "recon_key": f"{lrow['recon_key']} ~ {rrow['recon_key']}",
+                left_amt: float(lrow[left_amt]),
+                right_amt: float(rrow[right_amt]),
+                left_narr: lrow[left_narr],
+                right_narr: rrow[right_narr],
+                "status": MatchStatus.SEMANTIC_MATCH.value,
+                "difference": float(lrow[left_amt]) - float(rrow[right_amt]),
+                "match_method": "semantic",
+                "match_confidence": round(s, 3),
+            })
+
+    # Rows that survived the exact phase but were NOT semantically paired.
+    drop_left = {left_only.index[i] for i in matched_left_idx}
+    drop_right = {right_only.index[j] for j in matched_right_idx}
+    remaining = merged.drop(index=list(drop_left | drop_right)).copy()
+    remaining["match_method"] = remaining["status"].apply(
+        lambda s: "exact" if s in (MatchStatus.MATCHED.value,
+                                   MatchStatus.AMOUNT_MISMATCH.value) else "none")
+    remaining["match_confidence"] = remaining["status"].apply(
+        lambda s: 1.0 if s in (MatchStatus.MATCHED.value,
+                               MatchStatus.AMOUNT_MISMATCH.value) else 0.0)
+
+    detail = pd.concat([remaining, pd.DataFrame(semantic_rows)],
+                       ignore_index=True) if semantic_rows else remaining
+    detail = detail.reset_index(drop=True)
+
+    breaks = detail[~detail["status"].isin(MATCHED_STATUSES)].copy()
+
+    counts = detail["status"].value_counts().to_dict()
+    matched_conf = detail.loc[detail["status"].isin(MATCHED_STATUSES), "match_confidence"]
+    summary = {
+        "total_keys": int(len(detail)),
+        "matched": int(counts.get(MatchStatus.MATCHED.value, 0)),
+        "semantic_matched": int(counts.get(MatchStatus.SEMANTIC_MATCH.value, 0)),
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "missing_in_right": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "missing_in_left": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        f"{left.role}_total": round(float(merged[left_amt].fillna(0).sum()), 2),
+        f"{right.role}_total": round(float(merged[right_amt].fillna(0).sum()), 2),
+        "net_difference": round(float(detail["difference"].sum()), 2),
+    }
+
+    result = ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=detail, summary=summary,
+    )
+    result.confidence = round(float(matched_conf.mean()), 3) if len(matched_conf) else 1.0
+    return result
+
+
+def one_to_many_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    one: DataSource,
+    many: DataSource,
+    tolerance: float = 0.01,
+    max_group_size: int = 4,
+) -> ReconResult:
+    """
+    Feedback #4 — one-to-many match discovery.
+
+    Each record on the `one` side is matched against COMBINATIONS of up to
+    `max_group_size` records on the `many` side whose amounts sum to it (within
+    `tolerance`). Useful for payment splits, partial settlements and batch
+    postings — e.g. three wallet debits of 100/250/150 settling one 500 order.
+
+    Group search is bounded (combinations up to max_group_size) to stay tractable;
+    the first qualifying group per `one` record is taken, then its members are
+    consumed so they can't match again.
+    """
+    one_n = one.normalized()
+    many_n = many.normalized()
+    one_amt = f"{one.role}_amount"
+    many_amt = f"{many.role}_amount"
+
+    available = list(many_n.index)
+    rows: List[dict] = []
+    matched_one = 0
+
+    for _, orow in one_n.iterrows():
+        target = float(orow[one_amt])
+        pool = [(idx, float(many_n.loc[idx, many_amt])) for idx in available]
+        found: Optional[List[int]] = None
+
+        # try smallest groups first (1 member, then 2, ...)
+        for size in range(1, max_group_size + 1):
+            if found:
+                break
+            for combo in combinations(pool, size):
+                if abs(sum(v for _, v in combo) - target) <= tolerance:
+                    found = [idx for idx, _ in combo]
+                    break
+
+        if found is not None:
+            for idx in found:
+                available.remove(idx)
+            matched_one += 1
+            member_keys = many_n.loc[found, "recon_key"].tolist()
+            rows.append({
+                "recon_key": orow["recon_key"],
+                one_amt: target,
+                many_amt: round(float(many_n.loc[found, many_amt].sum()), 2),
+                "matched_members": ", ".join(map(str, member_keys)),
+                "group_size": len(found),
+                "status": MatchStatus.ONE_TO_MANY_MATCH.value,
+                "difference": round(target - float(many_n.loc[found, many_amt].sum()), 2),
+                "match_method": "one_to_many",
+                "match_confidence": 1.0,
+            })
+        else:
+            rows.append({
+                "recon_key": orow["recon_key"], one_amt: target, many_amt: None,
+                "matched_members": "", "group_size": 0,
+                "status": MatchStatus.MISSING_IN_RIGHT.value,
+                "difference": target, "match_method": "none", "match_confidence": 0.0,
+            })
+
+    # leftover `many` records that were never consumed
+    for idx in available:
+        mrow = many_n.loc[idx]
+        rows.append({
+            "recon_key": mrow["recon_key"], one_amt: None,
+            many_amt: float(mrow[many_amt]), "matched_members": "", "group_size": 0,
+            "status": MatchStatus.MISSING_IN_LEFT.value,
+            "difference": -float(mrow[many_amt]),
+            "match_method": "none", "match_confidence": 0.0,
+        })
+
+    detail = pd.DataFrame(rows)
+    breaks = detail[~detail["status"].isin(MATCHED_STATUSES)].copy()
+    counts = detail["status"].value_counts().to_dict()
+    summary = {
+        "total_one_records": int(len(one_n)),
+        "one_to_many_matched": int(counts.get(MatchStatus.ONE_TO_MANY_MATCH.value, 0)),
+        "missing_in_right": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "missing_in_left": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        f"{one.role}_total": round(float(one_n[one_amt].sum()), 2),
+        f"{many.role}_total": round(float(many_n[many_amt].sum()), 2),
+        "net_difference": round(float(detail["difference"].fillna(0).sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=detail.reset_index(drop=True), summary=summary,
+    )
