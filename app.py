@@ -53,8 +53,8 @@ def _pick(options, *preferred):
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Reconciliation GenAI", page_icon="🧮", layout="wide")
-st.title("🧮 Reconciliation + GenAI")
+st.set_page_config(page_title="Reconciliation Wrap model", page_icon="🧮", layout="wide")
+st.title("🧮 Reconciliation Wrap model")
 st.caption("Match two feeds, then let AI explain the breaks, draft journals, and flag anomalies.")
 
 # --- Sidebar: credentials + model ------------------------------------------
@@ -132,10 +132,17 @@ if view == "Pipeline (end-to-end)":
     st.stop()
 
 # --- Rule selection ---------------------------------------------------------
+rule_ids = wrapper.list_rules()
+if not rule_ids:
+    st.error("No reconciliation rules are registered.")
+    st.stop()
+# Precompute labels into a plain dict; format_func then does a pure dict lookup
+# (no live attribute traversal inside Streamlit's widget machinery).
+rule_labels = {r: wrapper.rules[r].label for r in rule_ids}
 rule_id = st.selectbox(
     "Reconciliation rule",
-    options=wrapper.list_rules(),
-    format_func=lambda r: wrapper.rules[r].label,
+    options=rule_ids,
+    format_func=lambda r: rule_labels.get(r, r),
 )
 spec = wrapper.rules[rule_id]
 st.markdown(f"> {wrapper.describe(rule_id).splitlines()[-1].strip()}")
