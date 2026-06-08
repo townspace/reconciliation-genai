@@ -116,6 +116,53 @@ register(RuleSpec(
 ))
 
 
+# ===========================================================================
+# Mode 3 — rate validation (expected charge from a rate master)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# R13  —  B2C service-charge master vs PG/EDC settlement (RATE_VALIDATION)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R13",
+    label="R13 — Service-charge validation (PG/EDC settlement vs rate master)",
+    description=("Validate the B2C service charge on each PG/EDC settlement against "
+                 "the service-charge rate master (expected = base × rate%)"),
+    mode="rate_validation",
+    recon_key="txn_id",
+    feeds=[
+        FeedSpec("settlement", "PG/EDC settlement (actual charge)",
+                 extra=[("Base amount column", "base_column", ["base_amount"]),
+                        ("Rate lookup column", "lookup_key", ["charge_type"])]),
+        FeedSpec("rate_master", "Service-charge rate master"),
+    ],
+    rate_map={"base_column": "base_amount", "lookup_key": "charge_type",
+              "rate_is_pct": True},
+    tolerance=0.01,
+))
+
+# ---------------------------------------------------------------------------
+# R11  —  Merchant commission master vs channel-partner txns (RATE_VALIDATION)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R11",
+    label="R11 — Commission validation (channel-partner txns vs rate master)",
+    description=("Validate merchant commission on channel-partner transactions "
+                 "against the commission rate master (expected = base × rate%)"),
+    mode="rate_validation",
+    recon_key="txn_id",
+    feeds=[
+        FeedSpec("channel_partner", "Channel-partner txns (actual commission)",
+                 extra=[("Base amount column", "base_column", ["base_amount"]),
+                        ("Rate lookup column", "lookup_key", ["merchant_id"])]),
+        FeedSpec("commission_master", "Merchant commission rate master"),
+    ],
+    rate_map={"base_column": "base_amount", "lookup_key": "merchant_id",
+              "rate_is_pct": True},
+    tolerance=0.01,
+))
+
+
 # ---------------------------------------------------------------------------
 # Template for the next rule (copy, adapt, register):
 #

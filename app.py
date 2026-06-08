@@ -97,6 +97,7 @@ samples = sample_data(rule_id) if use_sample else {}
 
 # --- Per-role inputs --------------------------------------------------------
 sources: dict[str, DataSource] = {}
+rate_overrides: dict = {}      # rate_validation: extra column choices
 ready = True
 cols = st.columns(len(feeds))
 
@@ -123,11 +124,12 @@ for feed, col in zip(feeds, cols):
         key_col = st.selectbox(
             "Key column", opts,
             index=_pick(opts, "txn_id", "wallet_txn_id", "order_id", "posting_id",
-                        "bank_ref", "journal_id"),
+                        "bank_ref", "journal_id", "charge_type", "merchant_id"),
             key=f"key_{role}")
         amt_col = st.selectbox(
             "Amount column", opts,
             index=_pick(opts, "wallet_amount_utilized", "gross_amount", "net_amount",
+                        "actual_charge", "actual_commission", "rate_pct",
                         "transaction_amount", "amount"),
             key=f"amt_{role}")
         narr_col = None
@@ -143,6 +145,11 @@ for feed, col in zip(feeds, cols):
                 index=_pick(opts, "txn_date", "settle_date", "date", "value_date",
                             "posting_date"),
                 key=f"date_{role}")
+        # Extra column pickers (e.g. rate_validation base/lookup columns).
+        for label, rmap_key, candidates in feed.extra:
+            choice = st.selectbox(label, opts, index=_pick(opts, *candidates),
+                                  key=f"extra_{role}_{rmap_key}")
+            rate_overrides[rmap_key] = choice
 
         sources[role] = DataSource(role, df, key_col, amt_col,
                                    narration_column=narr_col, date_column=date_col)
@@ -167,7 +174,8 @@ if run and ready:
     with st.spinner("Reconciling" + (" and enriching with AI…" if client else "…")):
         try:
             result = wrapper.run_rule(rule_id, sources, enrich=bool(client),
-                                      client=client, tolerance=tol)
+                                      client=client, tolerance=tol,
+                                      rate_map=rate_overrides or None)
         except Exception as exc:  # surface input/config errors plainly
             st.error(f"Run failed: {exc}")
             st.stop()

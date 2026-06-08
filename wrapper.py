@@ -54,10 +54,12 @@ class ReconWrapper:
                  enrich: bool = False, client=None,
                  gl_mapping: Optional[Dict[str, str]] = None,
                  group_column: Optional[str] = None,
-                 tolerance: Optional[float] = None) -> ReconResult:
+                 tolerance: Optional[float] = None,
+                 rate_map: Optional[Dict[str, str]] = None) -> ReconResult:
         if rule_id not in self.rules:
             raise KeyError(f"Unknown rule '{rule_id}'. Available: {self.list_rules()}")
-        result = dispatch(self.rules[rule_id], sources, tolerance=tolerance)
+        result = dispatch(self.rules[rule_id], sources, tolerance=tolerance,
+                          rate_map=rate_map)
         if enrich:
             result = self.enrich(result, client=client, gl_mapping=gl_mapping,
                                  group_column=group_column)

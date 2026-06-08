@@ -39,6 +39,10 @@ class FeedSpec:
     hint: str = ""
     narration: bool = False     # does this feed carry a free-text narration?
     date: bool = False          # does this feed carry a value/posting date?
+    # Extra column pickers for modes that need more than key/amount, as
+    # (label, rate_map_key, [candidate column names]) — e.g. rate_validation's
+    # base amount and rate-lookup key.
+    extra: list = field(default_factory=list)
 
 
 @dataclass
@@ -141,6 +145,15 @@ def _one_to_many(spec: RuleSpec, sources: dict) -> ReconResult:
     )
 
 
+def _rate_validation(spec: RuleSpec, sources: dict) -> ReconResult:
+    from engines import rate_validation_recon
+    return rate_validation_recon(
+        rule_id=spec.id, description=spec.description, recon_key=spec.recon_key,
+        txn=sources[spec.left_role], rate_master=sources[spec.right_role],
+        rate_map=spec.rate_map or {}, tolerance=spec.tolerance,
+    )
+
+
 def _tolerance_timing(spec: RuleSpec, sources: dict) -> ReconResult:
     from engines import tolerance_timing_recon
     return tolerance_timing_recon(
@@ -159,6 +172,7 @@ MODE_ENGINES: Dict[str, Callable[[RuleSpec, dict], ReconResult]] = {
     "semantic": _semantic,
     "one_to_many": _one_to_many,
     "tolerance_timing": _tolerance_timing,
+    "rate_validation": _rate_validation,
 }
 
 
@@ -191,16 +205,23 @@ def _ensure_schema(result: ReconResult) -> ReconResult:
     return result
 
 
-def dispatch(spec: RuleSpec, sources: dict, tolerance: Optional[float] = None) -> ReconResult:
+def dispatch(spec: RuleSpec, sources: dict, tolerance: Optional[float] = None,
+             rate_map: Optional[Dict[str, str]] = None) -> ReconResult:
     """Validate inputs and run the engine for this rule's mode.
 
-    `tolerance` (if given) overrides the rule's configured tolerance for this run,
-    so the UI can expose a tolerance control without mutating the registry.
+    `tolerance` (if given) overrides the rule's configured tolerance for this run.
+    `rate_map` (if given) is merged over the rule's rate_map, so the UI can remap
+    rate-validation columns for uploaded data — neither mutates the registry.
     """
     _require(spec, sources)
+    overrides = {}
     if tolerance is not None:
+        overrides["tolerance"] = tolerance
+    if rate_map:
+        overrides["rate_map"] = {**(spec.rate_map or {}), **rate_map}
+    if overrides:
         from dataclasses import replace
-        spec = replace(spec, tolerance=tolerance)
+        spec = replace(spec, **overrides)
     engine = MODE_ENGINES.get(spec.mode)
     if engine is None:
         raise ValueError(f"No engine registered for mode '{spec.mode}'")

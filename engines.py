@@ -252,6 +252,102 @@ def semantic_recon(
     return result
 
 
+def rate_validation_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    txn: DataSource,
+    rate_master: DataSource,
+    rate_map: dict,
+    tolerance: float = 0.01,
+) -> ReconResult:
+    """
+    Mode 3 — rate validation (R11, R13).
+
+    There is no second transaction amount to join against; instead the EXPECTED
+    charge is computed from a rate master and compared to the ACTUAL deduction.
+
+    `txn` carries the recon key (`txn.key_column`) and the actual charge
+    (`txn.amount_column`). `rate_map` names the rest:
+      base_column : column in txn holding the base amount
+      lookup_key  : column in txn used to look up the rate
+      rate_is_pct : True if the master stores a percentage (default True)
+    `rate_master` provides the lookup (`key_column`) and the rate
+    (`amount_column`).
+
+    expected = base × rate (rate/100 when rate_is_pct). On-rate rows MATCH;
+    off-rate rows are AMOUNT_MISMATCH; rows with no rate in the master are breaks.
+    Money is computed with Decimal.
+    """
+    from decimal import Decimal
+
+    base_col = rate_map["base_column"]
+    lookup_col = rate_map["lookup_key"]
+    rate_is_pct = rate_map.get("rate_is_pct", True)
+
+    mdf = rate_master.df
+    rate_lookup = dict(zip(mdf[rate_master.key_column].astype(str).str.strip(),
+                           mdf[rate_master.amount_column]))
+    tol = Decimal(str(tolerance))
+
+    rows = []
+    for _, t in txn.df.iterrows():
+        key = str(t[txn.key_column]).strip()
+        base = Decimal(str(t[base_col]))
+        actual = Decimal(str(t[txn.amount_column]))
+        lk = str(t[lookup_col]).strip()
+
+        if lk not in rate_lookup or pd.isna(rate_lookup[lk]):
+            rows.append({
+                "recon_key": key, "lookup": lk, "base_amount": float(base),
+                "expected_amount": None, "actual_amount": float(actual),
+                "status": MatchStatus.AMOUNT_MISMATCH.value,
+                "difference": float(actual),
+                "break_reason": f"no rate for '{lk}' in master",
+                "computed_from": "",
+            })
+            continue
+
+        rate = Decimal(str(rate_lookup[lk]))
+        expected = base * (rate / Decimal(100) if rate_is_pct else rate)
+        diff = actual - expected
+        on_rate = abs(diff) <= tol
+        unit = "%" if rate_is_pct else "x"
+        rows.append({
+            "recon_key": key, "lookup": lk, "base_amount": float(base),
+            "expected_amount": round(float(expected), 2),
+            "actual_amount": float(actual),
+            "status": MatchStatus.MATCHED.value if on_rate
+            else MatchStatus.AMOUNT_MISMATCH.value,
+            "difference": round(float(diff), 2),
+            "break_reason": "" if on_rate
+            else f"expected {round(float(expected),2)} at {rate}{unit}, actual {actual}",
+            "computed_from": f"{base} x {rate}{unit}",
+        })
+
+    detail = pd.DataFrame(rows)
+    breaks = detail[~detail["status"].isin(MATCHED_STATUSES)].copy()
+    counts = detail["status"].value_counts().to_dict()
+    not_found = int((detail["expected_amount"].isna()).sum())
+    summary = {
+        "total_keys": int(len(detail)),
+        "matched": int(counts.get(MatchStatus.MATCHED.value, 0)),
+        "off_rate": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)) - not_found,
+        "rate_not_found": not_found,
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "total_breaks": int(len(breaks)),
+        f"{txn.role}_actual_total": round(float(detail["actual_amount"].sum()), 2),
+        "expected_total": round(float(detail["expected_amount"].dropna().sum()), 2),
+        "net_difference": round(float(detail["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=detail.reset_index(drop=True), summary=summary,
+    )
+
+
 def tolerance_timing_recon(
     rule_id: str,
     description: str,

@@ -76,6 +76,35 @@ def sample_data(rule_id: str) -> dict:
         })
         return {"wallet_internal": wallet_internal, "wallet_provider": wallet_provider}
 
+    if rule_id == "R13":
+        settlement = pd.DataFrame({
+            "txn_id":       ["S1", "S2", "S3", "S4", "S5"],
+            "base_amount":  [1000.00, 5000.00, 2000.00, 800.00, 1500.00],
+            "charge_type":  ["STD", "PREMIUM", "STD", "PROMO", "UNKNOWN"],
+            "actual_charge": [20.00, 90.00, 40.00, 5.00, 30.00],
+        })
+        # expected: STD 2% , PREMIUM 1.5%, PROMO 0%. S2/S4 off-rate; S5 no rate.
+        rate_master = pd.DataFrame({
+            "charge_type": ["STD", "PREMIUM", "PROMO"],
+            "rate_pct":    [2.0, 1.5, 0.0],
+        })
+        return {"settlement": settlement, "rate_master": rate_master}
+
+    if rule_id == "R11":
+        channel_partner = pd.DataFrame({
+            "txn_id":            ["M1", "M2", "M3", "M4"],
+            "base_amount":       [1000.00, 2000.00, 500.00, 900.00],
+            "merchant_id":       ["MERCH_A", "MERCH_B", "MERCH_A", "MERCH_X"],
+            "actual_commission": [50.00, 75.00, 25.00, 45.00],
+        })
+        # expected: MERCH_A 5%, MERCH_B 3%. M2 off-rate; M4 no rate.
+        commission_master = pd.DataFrame({
+            "merchant_id": ["MERCH_A", "MERCH_B"],
+            "rate_pct":    [5.0, 3.0],
+        })
+        return {"channel_partner": channel_partner,
+                "commission_master": commission_master}
+
     if rule_id == "R3":
         orders = pd.DataFrame({
             "order_id": ["O-1", "O-2", "O-3"],
