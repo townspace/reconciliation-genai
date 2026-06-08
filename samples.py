@@ -43,6 +43,39 @@ def sample_data(rule_id: str) -> dict:
         })
         return {"bank": bank, "gl": gl}
 
+    if rule_id == "R4":
+        oms_b2b = pd.DataFrame({
+            "order_id": ["O1", "O2", "O3", "O4"],
+            "amount":   [1000.00, 2000.00, 3000.00, 4000.00],
+        })
+        channel_partner = pd.DataFrame({
+            "order_id": ["O1", "O2", "O3", "O5"],
+            "amount":   [1000.00, 1950.00, 3000.00, 500.00],
+        })
+        return {"oms_b2b": oms_b2b, "channel_partner": channel_partner}
+
+    if rule_id == "R5":
+        internal_wallet = pd.DataFrame({
+            "txn_id": ["I1", "I2", "I3"],
+            "amount": [500.00, 750.00, 900.00],
+        })
+        pg_edc = pd.DataFrame({
+            "txn_id": ["I1", "I2", "I4"],
+            "amount": [500.00, 700.00, 300.00],
+        })
+        return {"internal_wallet": internal_wallet, "pg_edc": pg_edc}
+
+    if rule_id == "R6":
+        pg_edc = pd.DataFrame({
+            "sub_id": ["SUB1", "SUB2", "SUB3"],
+            "amount": [299.00, 499.00, 999.00],
+        })
+        subscription = pd.DataFrame({
+            "sub_id": ["SUB1", "SUB2", "SUB4"],
+            "amount": [299.00, 499.00, 150.00],
+        })
+        return {"pg_edc": pg_edc, "subscription": subscription}
+
     if rule_id == "R8":
         # window=2d, fee allowance ~3%. Covers matched / timing / fee / genuine
         # break / one-sided.

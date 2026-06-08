@@ -73,6 +73,55 @@ register(RuleSpec(
 ))
 
 
+# ---------------------------------------------------------------------------
+# R4  —  OMS-B2B vs channel-partner transactions (EXACT)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R4",
+    label="R4 — OMS-B2B vs channel-partner txns (exact)",
+    description=("OMS B2B order amounts must match the channel-partner "
+                 "transaction report on the shared order id"),
+    mode="exact_key",
+    recon_key="order_id",
+    feeds=[
+        FeedSpec("oms_b2b", "OMS B2B orders"),
+        FeedSpec("channel_partner", "Channel-partner transactions"),
+    ],
+))
+
+# ---------------------------------------------------------------------------
+# R5  —  Internal wallet vs PG/EDC report (EXACT, report-to-report)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R5",
+    label="R5 — Internal wallet vs PG/EDC (exact)",
+    description=("Internal wallet report reconciled to the PG/EDC report on the "
+                 "shared transaction id"),
+    mode="exact_key",
+    recon_key="txn_id",
+    feeds=[
+        FeedSpec("internal_wallet", "Internal wallet report"),
+        FeedSpec("pg_edc", "PG/EDC report"),
+    ],
+))
+
+# ---------------------------------------------------------------------------
+# R6  —  PG/EDC vs internal subscription report (EXACT, report-to-report)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R6",
+    label="R6 — PG/EDC vs internal subscription (exact)",
+    description=("PG/EDC report reconciled to the internal subscription report "
+                 "on the shared subscription id"),
+    mode="exact_key",
+    recon_key="sub_id",
+    feeds=[
+        FeedSpec("pg_edc", "PG/EDC report"),
+        FeedSpec("subscription", "Internal subscription report"),
+    ],
+))
+
+
 # ===========================================================================
 # Mode 2 — tolerance + timing (fees + value-date lag)
 # ===========================================================================
@@ -220,6 +269,13 @@ register(RuleSpec(
     group_by="remittance_id",
     tolerance=0.01,
 ))
+
+
+# ---------------------------------------------------------------------------
+# R14 — TODO. The build-plan diagram defines R1–R13 only; there is no R14 on it.
+# Not inventing behaviour. If a 14th rule is later specified, register it here
+# with its mode and feeds rather than guessing.
+# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
