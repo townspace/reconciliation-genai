@@ -29,6 +29,7 @@ from base import DataSource
 from wrapper import ReconWrapper
 from ai.client import OpenAIClient
 from samples import sample_data
+from pipeline import golden_path
 
 def _display(df):
     """Hide columns that are entirely empty/NA so a mode's unused generalised
@@ -80,6 +81,55 @@ with st.sidebar:
     )
 
 wrapper = ReconWrapper()
+
+view = st.sidebar.radio("View", ["Single rule", "Pipeline (end-to-end)"])
+
+# ===========================================================================
+# Pipeline view — the connected OMS -> bank money trace (Phase 7)
+# ===========================================================================
+if view == "Pipeline (end-to-end)":
+    st.header("End-to-end pipeline — golden path")
+    st.caption("R2 semantic → R8 settlement timing → R13 charge validation → "
+               "R12 bank reco, on the built-in sample data.")
+
+    pipe, sources_ps, rate_maps, flows = golden_path()
+    presult = pipe.run(sources_ps, wrapper=wrapper, rate_map_per_stage=rate_maps)
+
+    st.subheader("Per-stage summary (four-lane structure)")
+    st.dataframe(presult.stage_summary, width="stretch", hide_index=True)
+    cols = st.columns(len(pipe.stages))
+    for c, stg in zip(cols, pipe.stages):
+        r = presult.results[stg.name]
+        c.metric(f"{stg.name} ({stg.lane})",
+                 f"{len(r.detail) - len(r.breaks)}/{len(r.detail)} ok",
+                 delta=f"-{len(r.breaks)} breaks" if len(r.breaks) else "clean",
+                 delta_color="inverse")
+
+    st.subheader("End-to-end trace — first breaking hop per flow")
+    trace = pipe.trace(presult, flows)
+
+    def _hl(row):
+        out = []
+        fb = row["first_break"]
+        for col in trace.columns:
+            if col == "first_break" and fb != "(clean)":
+                out.append("background-color:#ffe0e0")
+            elif col == fb and fb != "(clean)":
+                out.append("background-color:#ffe0e0")
+            else:
+                out.append("")
+        return out
+
+    st.dataframe(trace.style.apply(_hl, axis=1), width="stretch", hide_index=True)
+
+    st.subheader("Drill into a hop")
+    pick = st.selectbox("Stage", [s.name for s in pipe.stages])
+    res = presult.results[pick]
+    if len(res.breaks):
+        st.dataframe(_display(res.breaks), width="stretch")
+    else:
+        st.success(f"{pick}: no breaks at this hop. ✅")
+    st.stop()
 
 # --- Rule selection ---------------------------------------------------------
 rule_id = st.selectbox(
