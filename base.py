@@ -50,16 +50,25 @@ class MatchStatus(str, Enum):
     MATCHED = "MATCHED"                       # key present both sides, amounts equal
     SEMANTIC_MATCH = "SEMANTIC_MATCH"         # matched by narration similarity, not key
     ONE_TO_MANY_MATCH = "ONE_TO_MANY_MATCH"   # one record matched to a sum of several
+    AGGREGATE_MATCH = "AGGREGATE_MATCH"       # group of txns matched to one bank line (N:1)
+    MATCHED_WITHIN_TOLERANCE = "MATCHED_WITHIN_TOLERANCE"  # equal within tolerance band
+    FEE_DIFFERENCE = "FEE_DIFFERENCE"         # difference explained by an allowed fee
+    TIMING_DIFFERENCE = "TIMING_DIFFERENCE"   # amounts agree, only a value-date lag
     AMOUNT_MISMATCH = "AMOUNT_MISMATCH"       # key present both sides, amounts differ
     MISSING_IN_RIGHT = "MISSING_IN_RIGHT"     # key only in the left (primary) source
     MISSING_IN_LEFT = "MISSING_IN_LEFT"       # key only in the right (secondary) source
 
 
-# Statuses that count as a successful reconciliation (not a break).
+# Statuses that count as a successful reconciliation (not a break). Fee/timing
+# differences are reconciled-with-reason: explained, so not breaks.
 MATCHED_STATUSES = {
     MatchStatus.MATCHED.value,
     MatchStatus.SEMANTIC_MATCH.value,
     MatchStatus.ONE_TO_MANY_MATCH.value,
+    MatchStatus.AGGREGATE_MATCH.value,
+    MatchStatus.MATCHED_WITHIN_TOLERANCE.value,
+    MatchStatus.FEE_DIFFERENCE.value,
+    MatchStatus.TIMING_DIFFERENCE.value,
 }
 
 
@@ -80,12 +89,27 @@ class DataSource:
     key_column: str
     amount_column: str
     narration_column: Optional[str] = None
+    date_column: Optional[str] = None       # value/posting date (tolerance_timing)
 
     def normalized(self) -> pd.DataFrame:
         """Return a 2-column frame [recon_key, <role>_amount] with a clean, typed key."""
         out = self.df[[self.key_column, self.amount_column]].copy()
         out.columns = ["recon_key", f"{self.role}_amount"]
         out["recon_key"] = out["recon_key"].astype(str).str.strip()
+        return out
+
+    def normalized_with_date(self) -> pd.DataFrame:
+        """Like normalized() but also carries a parsed <role>_date column.
+
+        If this source has no date_column, the date is NaT so timing-aware engines
+        treat the lag as unknown (zero).
+        """
+        out = self.normalized()
+        if self.date_column and self.date_column in self.df.columns:
+            out[f"{self.role}_date"] = pd.to_datetime(
+                self.df[self.date_column], errors="coerce").reset_index(drop=True)
+        else:
+            out[f"{self.role}_date"] = pd.NaT
         return out
 
     def normalized_with_narration(self) -> pd.DataFrame:

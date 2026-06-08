@@ -252,6 +252,312 @@ def semantic_recon(
     return result
 
 
+def aggregate_match_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    many: DataSource,
+    bank: DataSource,
+    tolerance: float = 0.01,
+) -> ReconResult:
+    """
+    Mode 4 — N:1 aggregation / bank reco (R9, R10, R12).
+
+    Group the `many` feed by its key (the settlement batch / value date used as
+    the recon key), sum the amounts, then match each group total to the single
+    `bank` line with the same key.
+
+      AGGREGATE_MATCH    group total equals the bank line (± tolerance)
+      AMOUNT_MISMATCH    group and bank line exist but totals differ (partial)
+      MISSING_IN_RIGHT   transaction group with no bank line (unallocated group)
+      MISSING_IN_LEFT    bank line with no transaction group (unmatched credit)
+
+    Money is summed with Decimal to avoid float drift across many rows.
+    """
+    from decimal import Decimal
+
+    l = many.normalized()
+    r = bank.normalized()
+    many_amt = f"{many.role}_amount"
+    bank_amt = f"{bank.role}_amount"
+
+    dup_bank = r["recon_key"][r["recon_key"].duplicated()].unique().tolist()
+
+    # Aggregate the many-side by key (Decimal sum), keeping a member count.
+    grouped = (l.groupby("recon_key")[many_amt]
+               .apply(lambda s: float(sum(Decimal(str(v)) for v in s)))
+               .reset_index())
+    sizes = l.groupby("recon_key").size().reset_index(name="group_size")
+    grouped = grouped.merge(sizes, on="recon_key")
+
+    merged = grouped.merge(r, on="recon_key", how="outer", indicator=True)
+    tol = Decimal(str(tolerance))
+
+    statuses, reasons = [], []
+    for _, row in merged.iterrows():
+        if row["_merge"] == "left_only":
+            statuses.append(MatchStatus.MISSING_IN_RIGHT.value)
+            reasons.append("transaction group has no bank line (unallocated)")
+        elif row["_merge"] == "right_only":
+            statuses.append(MatchStatus.MISSING_IN_LEFT.value)
+            reasons.append("bank line has no transaction group (unmatched credit)")
+        else:
+            diff = Decimal(str(row[many_amt])) - Decimal(str(row[bank_amt]))
+            if abs(diff) <= tol:
+                statuses.append(MatchStatus.AGGREGATE_MATCH.value)
+                reasons.append("")
+            else:
+                statuses.append(MatchStatus.AMOUNT_MISMATCH.value)
+                reasons.append(f"group total {row[many_amt]} vs bank {row[bank_amt]} "
+                               f"(off by {float(diff):+.2f})")
+
+    merged["status"] = statuses
+    merged["break_reason"] = reasons
+    merged["group_size"] = merged["group_size"].fillna(0).astype(int)
+    merged["difference"] = merged[many_amt].fillna(0) - merged[bank_amt].fillna(0)
+    merged = merged.drop(columns=["_merge"])
+
+    breaks = merged[~merged["status"].isin(MATCHED_STATUSES)].copy()
+    counts = merged["status"].value_counts().to_dict()
+    summary = {
+        "total_groups": int(len(merged)),
+        "aggregate_matched": int(counts.get(MatchStatus.AGGREGATE_MATCH.value, 0)),
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "unallocated_groups": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "unmatched_bank_lines": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        "duplicate_bank_keys": len(dup_bank),
+        f"{many.role}_total": round(float(l[many_amt].sum()), 2),
+        f"{bank.role}_total": round(float(r[bank_amt].sum()), 2),
+        "net_difference": round(float(merged["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=merged.reset_index(drop=True), summary=summary,
+    )
+
+
+def rate_validation_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    txn: DataSource,
+    rate_master: DataSource,
+    rate_map: dict,
+    tolerance: float = 0.01,
+) -> ReconResult:
+    """
+    Mode 3 — rate validation (R11, R13).
+
+    There is no second transaction amount to join against; instead the EXPECTED
+    charge is computed from a rate master and compared to the ACTUAL deduction.
+
+    `txn` carries the recon key (`txn.key_column`) and the actual charge
+    (`txn.amount_column`). `rate_map` names the rest:
+      base_column : column in txn holding the base amount
+      lookup_key  : column in txn used to look up the rate
+      rate_is_pct : True if the master stores a percentage (default True)
+    `rate_master` provides the lookup (`key_column`) and the rate
+    (`amount_column`).
+
+    expected = base × rate (rate/100 when rate_is_pct). On-rate rows MATCH;
+    off-rate rows are AMOUNT_MISMATCH; rows with no rate in the master are breaks.
+    Money is computed with Decimal.
+    """
+    from decimal import Decimal
+
+    base_col = rate_map["base_column"]
+    lookup_col = rate_map["lookup_key"]
+    rate_is_pct = rate_map.get("rate_is_pct", True)
+
+    mdf = rate_master.df
+    rate_lookup = dict(zip(mdf[rate_master.key_column].astype(str).str.strip(),
+                           mdf[rate_master.amount_column]))
+    tol = Decimal(str(tolerance))
+
+    rows = []
+    for _, t in txn.df.iterrows():
+        key = str(t[txn.key_column]).strip()
+        base = Decimal(str(t[base_col]))
+        actual = Decimal(str(t[txn.amount_column]))
+        lk = str(t[lookup_col]).strip()
+
+        if lk not in rate_lookup or pd.isna(rate_lookup[lk]):
+            rows.append({
+                "recon_key": key, "lookup": lk, "base_amount": float(base),
+                "expected_amount": None, "actual_amount": float(actual),
+                "status": MatchStatus.AMOUNT_MISMATCH.value,
+                "difference": float(actual),
+                "break_reason": f"no rate for '{lk}' in master",
+                "computed_from": "",
+            })
+            continue
+
+        rate = Decimal(str(rate_lookup[lk]))
+        expected = base * (rate / Decimal(100) if rate_is_pct else rate)
+        diff = actual - expected
+        on_rate = abs(diff) <= tol
+        unit = "%" if rate_is_pct else "x"
+        rows.append({
+            "recon_key": key, "lookup": lk, "base_amount": float(base),
+            "expected_amount": round(float(expected), 2),
+            "actual_amount": float(actual),
+            "status": MatchStatus.MATCHED.value if on_rate
+            else MatchStatus.AMOUNT_MISMATCH.value,
+            "difference": round(float(diff), 2),
+            "break_reason": "" if on_rate
+            else f"expected {round(float(expected),2)} at {rate}{unit}, actual {actual}",
+            "computed_from": f"{base} x {rate}{unit}",
+        })
+
+    detail = pd.DataFrame(rows)
+    breaks = detail[~detail["status"].isin(MATCHED_STATUSES)].copy()
+    counts = detail["status"].value_counts().to_dict()
+    not_found = int((detail["expected_amount"].isna()).sum())
+    summary = {
+        "total_keys": int(len(detail)),
+        "matched": int(counts.get(MatchStatus.MATCHED.value, 0)),
+        "off_rate": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)) - not_found,
+        "rate_not_found": not_found,
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "total_breaks": int(len(breaks)),
+        f"{txn.role}_actual_total": round(float(detail["actual_amount"].sum()), 2),
+        "expected_total": round(float(detail["expected_amount"].dropna().sum()), 2),
+        "net_difference": round(float(detail["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=detail.reset_index(drop=True), summary=summary,
+    )
+
+
+def tolerance_timing_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    left: DataSource,
+    right: DataSource,
+    tolerance: float = 0.01,
+    fee_tolerance: float = 0.0,
+    fee_tolerance_pct: float = 0.0,
+    date_window: int = 2,
+) -> ReconResult:
+    """
+    Mode 2 — tolerance + timing (R7, R8).
+
+    Key join where the settlement amount may differ from the transaction amount
+    by an allowed FEE and the value date may LAG by up to `date_window` days.
+    Decomposes the difference instead of dumping it into AMOUNT_MISMATCH:
+
+      MATCHED                  amounts equal (≤ tolerance) and same date
+      TIMING_DIFFERENCE        amounts equal, date lag within the window
+      FEE_DIFFERENCE           shortfall within the allowed fee, date within window
+      AMOUNT_MISMATCH          shortfall beyond the fee, or lag beyond the window
+      MISSING_IN_RIGHT/LEFT    one-sided
+
+    Money is compared with Decimal to avoid float-equality artefacts. The allowed
+    fee is `max(fee_tolerance, fee_tolerance_pct% of the left amount)`.
+    """
+    from decimal import Decimal
+
+    l = left.normalized_with_date()
+    r = right.normalized_with_date()
+    left_amt = f"{left.role}_amount"
+    right_amt = f"{right.role}_amount"
+    left_date = f"{left.role}_date"
+    right_date = f"{right.role}_date"
+
+    dup_left = l["recon_key"][l["recon_key"].duplicated()].unique().tolist()
+    dup_right = r["recon_key"][r["recon_key"].duplicated()].unique().tolist()
+
+    merged = l.merge(r, on="recon_key", how="outer", indicator=True)
+
+    def _dec(v) -> Optional[Decimal]:
+        if pd.isna(v):
+            return None
+        return Decimal(str(v))
+
+    tol = Decimal(str(tolerance))
+    fee_abs = Decimal(str(fee_tolerance))
+    fee_pct = Decimal(str(fee_tolerance_pct))
+
+    statuses, reasons = [], []
+    for _, row in merged.iterrows():
+        if row["_merge"] == "left_only":
+            statuses.append(MatchStatus.MISSING_IN_RIGHT.value)
+            reasons.append("no settlement record")
+            continue
+        if row["_merge"] == "right_only":
+            statuses.append(MatchStatus.MISSING_IN_LEFT.value)
+            reasons.append("no transaction record")
+            continue
+
+        lv, rv = _dec(row[left_amt]), _dec(row[right_amt])
+        diff = (lv - rv) if (lv is not None and rv is not None) else Decimal(0)
+        abs_diff = abs(diff)
+        fee_allow = max(fee_abs, (fee_pct / Decimal(100)) * (lv or Decimal(0)))
+
+        ld, rd = row.get(left_date), row.get(right_date)
+        if pd.isna(ld) or pd.isna(rd):
+            lag = 0
+        else:
+            lag = abs((pd.Timestamp(ld).normalize() - pd.Timestamp(rd).normalize()).days)
+
+        if abs_diff <= tol:                       # amounts effectively equal
+            if lag == 0:
+                statuses.append(MatchStatus.MATCHED.value)
+                reasons.append("")
+            elif lag <= date_window:
+                statuses.append(MatchStatus.TIMING_DIFFERENCE.value)
+                reasons.append(f"value-date lag {lag}d (≤ {date_window}d)")
+            else:
+                statuses.append(MatchStatus.AMOUNT_MISMATCH.value)
+                reasons.append(f"value-date lag {lag}d exceeds window {date_window}d")
+        elif diff > 0 and abs_diff <= fee_allow and lag <= date_window:
+            statuses.append(MatchStatus.FEE_DIFFERENCE.value)
+            reasons.append(f"fee {abs_diff} within allowance {fee_allow}"
+                           + (f", lag {lag}d" if lag else ""))
+        else:
+            statuses.append(MatchStatus.AMOUNT_MISMATCH.value)
+            if diff > 0:
+                reasons.append(f"shortfall {abs_diff} exceeds fee allowance {fee_allow}")
+            else:
+                reasons.append(f"settlement exceeds transaction by {abs_diff}")
+
+    merged["status"] = statuses
+    merged["break_reason"] = reasons
+    merged["difference"] = merged[left_amt].fillna(0) - merged[right_amt].fillna(0)
+    merged = merged.drop(columns=["_merge"])
+
+    breaks = merged[~merged["status"].isin(MATCHED_STATUSES)].copy()
+    counts = merged["status"].value_counts().to_dict()
+    summary = {
+        "total_keys": int(len(merged)),
+        "matched": int(counts.get(MatchStatus.MATCHED.value, 0)),
+        "timing_difference": int(counts.get(MatchStatus.TIMING_DIFFERENCE.value, 0)),
+        "fee_difference": int(counts.get(MatchStatus.FEE_DIFFERENCE.value, 0)),
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "missing_in_right": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "missing_in_left": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        "duplicate_keys_left": len(dup_left),
+        "duplicate_keys_right": len(dup_right),
+        f"{left.role}_total": round(float(l[left_amt].sum()), 2),
+        f"{right.role}_total": round(float(r[right_amt].sum()), 2),
+        "net_difference": round(float(merged["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=merged.reset_index(drop=True), summary=summary,
+    )
+
+
 def one_to_many_recon(
     rule_id: str,
     description: str,

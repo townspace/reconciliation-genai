@@ -28,80 +28,18 @@ import streamlit as st
 from base import DataSource
 from wrapper import ReconWrapper
 from ai.client import OpenAIClient
+from samples import sample_data
+from pipeline import golden_path
 
-# ---------------------------------------------------------------------------
-# Per-rule UI metadata: which roles a rule needs, and whether each role wants a
-# narration column. Keeps the dynamic form generic across rules.
-# ---------------------------------------------------------------------------
-RULE_UI = {
-    "R1": {
-        "label": "R1 — Exact match (OMS/POS wallet vs internal wallet)",
-        "roles": {
-            "oms_pos": {"narration": False, "hint": "Primary feed (e.g. OMS/POS export)"},
-            "wallet":  {"narration": False, "hint": "Secondary feed (e.g. internal wallet)"},
-        },
-    },
-    "R2": {
-        "label": "R2 — Semantic match (bank narration vs GL description)",
-        "roles": {
-            "bank": {"narration": True, "hint": "Bank statement lines"},
-            "gl":   {"narration": True, "hint": "GL postings"},
-        },
-    },
-    "R3": {
-        "label": "R3 — One-to-many (split settlements summing to one order)",
-        "roles": {
-            "oms_pos": {"narration": False, "hint": "Single side (orders)"},
-            "wallet":  {"narration": False, "hint": "Split side (postings)"},
-        },
-    },
-}
-
-
-# ---------------------------------------------------------------------------
-# Built-in sample data, so the app is usable with zero setup. Mirrors the
-# synthetic frames in demo_genai.py.
-# ---------------------------------------------------------------------------
-def sample_data(rule_id: str):
-    if rule_id == "R1":
-        oms = pd.DataFrame({
-            "order_id":               ["A101", "A102", "A103", "A104", "A106"],
-            "wallet_amount_utilized": [500.00, 250.00, 120.00, 999.00, 50000.00],
-            "store_id":               ["S1", "S1", "S2", "S3", "S1"],
-        })
-        wallet = pd.DataFrame({
-            "order_id":           ["A101", "A102", "A103", "A105"],
-            "transaction_amount": [500.00, 245.00, 120.00, 300.00],
-            "wallet_txn_id":      ["W1", "W2", "W3", "W5"],
-        })
-        return {"oms_pos": oms, "wallet": wallet}
-
-    if rule_id == "R2":
-        bank = pd.DataFrame({
-            "bank_ref":  ["BNK-1", "BNK-2", "BNK-3", "BNK-4"],
-            "narration": ["NEFT ACME CORP 88123", "NEFT GLOBEX LTD REF4471",
-                          "NEFT INITECH PAYROLL JUN", "NEFT STARK INDS ADVANCE"],
-            "amount":    [12000.00, 4500.00, 80000.00, 250.00],
-        })
-        gl = pd.DataFrame({
-            "journal_id":  ["J-900", "J-901", "J-902", "J-903"],
-            "description": ["ACME CORP invoice 88123", "Globex Limited ref 4471",
-                            "Initech payroll June", "Wayne Enterprises misc"],
-            "amount":      [12000.00, 4500.00, 80000.00, 9000.00],
-        })
-        return {"bank": bank, "gl": gl}
-
-    if rule_id == "R3":
-        orders = pd.DataFrame({
-            "order_id": ["O-1", "O-2", "O-3"],
-            "amount":   [500.00, 750.00, 1000.00],
-        })
-        splits = pd.DataFrame({
-            "posting_id": ["P1", "P2", "P3", "P4", "P5", "P6"],
-            "amount":     [100.00, 250.00, 150.00, 750.00, 400.00, 200.00],
-        })
-        return {"oms_pos": orders, "wallet": splits}
-    return {}
+def _display(df):
+    """Hide columns that are entirely empty/NA so a mode's unused generalised
+    columns don't clutter the table (Phase 2: extra columns only when populated)."""
+    if df is None or not len(df):
+        return df
+    keep = [c for c in df.columns
+            if not df[c].isna().all()
+            and not (df[c].astype(str).str.strip() == "").all()]
+    return df[keep]
 
 
 def _pick(options, *preferred):
@@ -144,28 +82,80 @@ with st.sidebar:
 
 wrapper = ReconWrapper()
 
+view = st.sidebar.radio("View", ["Single rule", "Pipeline (end-to-end)"])
+
+# ===========================================================================
+# Pipeline view — the connected OMS -> bank money trace (Phase 7)
+# ===========================================================================
+if view == "Pipeline (end-to-end)":
+    st.header("End-to-end pipeline — golden path")
+    st.caption("R2 semantic → R8 settlement timing → R13 charge validation → "
+               "R12 bank reco, on the built-in sample data.")
+
+    pipe, sources_ps, rate_maps, flows = golden_path()
+    presult = pipe.run(sources_ps, wrapper=wrapper, rate_map_per_stage=rate_maps)
+
+    st.subheader("Per-stage summary (four-lane structure)")
+    st.dataframe(presult.stage_summary, width="stretch", hide_index=True)
+    cols = st.columns(len(pipe.stages))
+    for c, stg in zip(cols, pipe.stages):
+        r = presult.results[stg.name]
+        c.metric(f"{stg.name} ({stg.lane})",
+                 f"{len(r.detail) - len(r.breaks)}/{len(r.detail)} ok",
+                 delta=f"-{len(r.breaks)} breaks" if len(r.breaks) else "clean",
+                 delta_color="inverse")
+
+    st.subheader("End-to-end trace — first breaking hop per flow")
+    trace = pipe.trace(presult, flows)
+
+    def _hl(row):
+        out = []
+        fb = row["first_break"]
+        for col in trace.columns:
+            if col == "first_break" and fb != "(clean)":
+                out.append("background-color:#ffe0e0")
+            elif col == fb and fb != "(clean)":
+                out.append("background-color:#ffe0e0")
+            else:
+                out.append("")
+        return out
+
+    st.dataframe(trace.style.apply(_hl, axis=1), width="stretch", hide_index=True)
+
+    st.subheader("Drill into a hop")
+    pick = st.selectbox("Stage", [s.name for s in pipe.stages])
+    res = presult.results[pick]
+    if len(res.breaks):
+        st.dataframe(_display(res.breaks), width="stretch")
+    else:
+        st.success(f"{pick}: no breaks at this hop. ✅")
+    st.stop()
+
 # --- Rule selection ---------------------------------------------------------
 rule_id = st.selectbox(
     "Reconciliation rule",
-    options=list(RULE_UI.keys()),
-    format_func=lambda r: RULE_UI[r]["label"],
+    options=wrapper.list_rules(),
+    format_func=lambda r: wrapper.rules[r].label,
 )
+spec = wrapper.rules[rule_id]
 st.markdown(f"> {wrapper.describe(rule_id).splitlines()[-1].strip()}")
 
-roles = RULE_UI[rule_id]["roles"]
+feeds = spec.feeds          # list of FeedSpec (role, hint, narration)
 use_sample = st.toggle("Use built-in sample data", value=True,
                        help="Turn off to upload your own CSVs.")
 samples = sample_data(rule_id) if use_sample else {}
 
 # --- Per-role inputs --------------------------------------------------------
 sources: dict[str, DataSource] = {}
+rate_overrides: dict = {}      # rate_validation: extra column choices
 ready = True
-cols = st.columns(len(roles))
+cols = st.columns(len(feeds))
 
-for (role, meta), col in zip(roles.items(), cols):
+for feed, col in zip(feeds, cols):
+    role = feed.role
     with col:
         st.subheader(role)
-        st.caption(meta["hint"])
+        st.caption(feed.hint)
         df = None
         if use_sample:
             df = samples[role]
@@ -183,24 +173,48 @@ for (role, meta), col in zip(roles.items(), cols):
         opts = list(df.columns)
         key_col = st.selectbox(
             "Key column", opts,
-            index=_pick(opts, "order_id", "posting_id", "bank_ref", "journal_id"),
+            index=_pick(opts, "batch_id", "deposit_batch", "remittance_id", "txn_id",
+                        "wallet_txn_id", "order_id", "sub_id", "posting_id",
+                        "bank_ref", "journal_id", "charge_type", "merchant_id"),
             key=f"key_{role}")
         amt_col = st.selectbox(
             "Amount column", opts,
-            index=_pick(opts, "wallet_amount_utilized", "transaction_amount", "amount"),
+            index=_pick(opts, "wallet_amount_utilized", "gross_amount", "net_amount",
+                        "credit_amount", "actual_charge", "actual_commission",
+                        "rate_pct", "transaction_amount", "amount"),
             key=f"amt_{role}")
         narr_col = None
-        if meta["narration"]:
+        if feed.narration:
             narr_col = st.selectbox(
                 "Narration column", opts,
                 index=_pick(opts, "narration", "description"),
                 key=f"narr_{role}")
+        date_col = None
+        if feed.date:
+            date_col = st.selectbox(
+                "Date column", opts,
+                index=_pick(opts, "txn_date", "settle_date", "date", "value_date",
+                            "posting_date"),
+                key=f"date_{role}")
+        # Extra column pickers (e.g. rate_validation base/lookup columns).
+        for label, rmap_key, candidates in feed.extra:
+            choice = st.selectbox(label, opts, index=_pick(opts, *candidates),
+                                  key=f"extra_{role}_{rmap_key}")
+            rate_overrides[rmap_key] = choice
 
         sources[role] = DataSource(role, df, key_col, amt_col,
-                                   narration_column=narr_col)
+                                   narration_column=narr_col, date_column=date_col)
 
 # --- Run --------------------------------------------------------------------
 st.divider()
+# Amount tolerance. Exact-key rules default to 0 (strict equality), matching the
+# original behaviour; other modes default to their configured tolerance.
+default_tol = 0.0 if spec.mode == "exact_key" else float(spec.tolerance or 0.0)
+tol = st.number_input(
+    "Amount tolerance (absolute)", min_value=0.0, value=default_tol, step=0.01,
+    format="%.2f",
+    help="Amounts within this absolute difference count as matching. 0 = strict "
+         "equality (exact-key default).")
 run = st.button("▶ Run reconciliation", type="primary", disabled=not ready,
                 width="stretch")
 if not ready:
@@ -211,7 +225,8 @@ if run and ready:
     with st.spinner("Reconciling" + (" and enriching with AI…" if client else "…")):
         try:
             result = wrapper.run_rule(rule_id, sources, enrich=bool(client),
-                                      client=client)
+                                      client=client, tolerance=tol,
+                                      rate_map=rate_overrides or None)
         except Exception as exc:  # surface input/config errors plainly
             st.error(f"Run failed: {exc}")
             st.stop()
@@ -232,11 +247,11 @@ if run and ready:
         ["Detail", "Breaks", "Draft journals", "Anomalies"])
 
     with tab_detail:
-        st.dataframe(result.detail, width="stretch")
+        st.dataframe(_display(result.detail), width="stretch")
 
     with tab_breaks:
         if len(result.breaks):
-            st.dataframe(result.breaks, width="stretch")
+            st.dataframe(_display(result.breaks), width="stretch")
         else:
             st.success("No breaks — everything reconciled. ✅")
 

@@ -27,37 +27,39 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from base import DataSource, ReconResult, ReconType
-from rules import RULE_REGISTRY
+from registry import all_specs, dispatch
 
 
 class ReconWrapper:
-    """Orchestrates the per-rule mini models."""
+    """Orchestrates the rules declared in the registry, dispatching by mode."""
 
     def __init__(self) -> None:
-        # instantiate one of each registered mini model
-        self.models = {rid: cls() for rid, cls in RULE_REGISTRY.items()}
+        # the declarative rule registry (id -> RuleSpec), loaded on demand
+        self.rules = all_specs()
 
     # -- discovery -------------------------------------------------------
     def list_rules(self, recon_type: Optional[ReconType] = None) -> List[str]:
-        ids = sorted(self.models)
+        ids = sorted(self.rules)
         if recon_type is None:
             return ids
-        return [r for r in ids if self.models[r].recon_type == recon_type]
+        return [r for r in ids if self.rules[r].recon_type == recon_type]
 
     def describe(self, rule_id: str) -> str:
-        m = self.models[rule_id]
-        return (f"{m.rule_id} [{m.recon_type.value}/"
-                f"{getattr(m, 'matching_strategy', 'exact')}] key={m.recon_key} "
-                f"sources={m.required_sources}\n   {m.description}")
+        m = self.rules[rule_id]
+        return (f"{m.id} [{m.recon_type.value}/{m.mode}] key={m.recon_key} "
+                f"sources={m.required_roles}\n   {m.description}")
 
     # -- execution -------------------------------------------------------
     def run_rule(self, rule_id: str, sources: Dict[str, DataSource],
                  enrich: bool = False, client=None,
                  gl_mapping: Optional[Dict[str, str]] = None,
-                 group_column: Optional[str] = None) -> ReconResult:
-        if rule_id not in self.models:
+                 group_column: Optional[str] = None,
+                 tolerance: Optional[float] = None,
+                 rate_map: Optional[Dict[str, str]] = None) -> ReconResult:
+        if rule_id not in self.rules:
             raise KeyError(f"Unknown rule '{rule_id}'. Available: {self.list_rules()}")
-        result = self.models[rule_id].run(sources)
+        result = dispatch(self.rules[rule_id], sources, tolerance=tolerance,
+                          rate_map=rate_map)
         if enrich:
             result = self.enrich(result, client=client, gl_mapping=gl_mapping,
                                  group_column=group_column)
@@ -113,13 +115,13 @@ def build_config_interactively(wrapper: ReconWrapper) -> dict:
     print(f"Available {rtype} rules: {rules}")
     rule_id = input("Choose rule id: ").strip().upper()
 
-    model = wrapper.models[rule_id]
-    print(f"Rule {rule_id} expects {len(model.required_sources)} sources: "
-          f"{model.required_sources}")
+    spec = wrapper.rules[rule_id]
+    print(f"Rule {rule_id} expects {len(spec.required_roles)} sources: "
+          f"{spec.required_roles}")
     n = int(input("Number of data sources you will provide: ").strip())
 
     return {"recon_type": recon_type.value, "rule_id": rule_id,
-            "num_sources": n, "expected_sources": model.required_sources}
+            "num_sources": n, "expected_sources": spec.required_roles}
 
 
 def build_config_with_ai(frames: Dict[str, pd.DataFrame], client=None) -> dict:
