@@ -73,6 +73,49 @@ register(RuleSpec(
 ))
 
 
+# ===========================================================================
+# Mode 2 — tolerance + timing (fees + value-date lag)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# R8  —  PG/EDC transactions vs PG/EDC settlement (TOLERANCE_TIMING)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R8",
+    label="R8 — PG/EDC txn vs settlement (fees + timing)",
+    description=("PG/EDC transactions reconciled to the provider settlement, "
+                 "allowing a processing fee and a value-date lag"),
+    mode="tolerance_timing",
+    recon_key="txn_id",
+    feeds=[
+        FeedSpec("pg_txn", "PG/EDC transactions (gross)", date=True),
+        FeedSpec("pg_settlement", "PG/EDC settlement (net of fee)", date=True),
+    ],
+    tolerance=0.01,
+    fee_tolerance_pct=3.0,     # processing fee up to ~3%
+    date_window=2,             # settlement may lag up to 2 days
+))
+
+# ---------------------------------------------------------------------------
+# R7  —  Internal wallet vs wallet provider (TOLERANCE_TIMING)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R7",
+    label="R7 — Internal wallet vs wallet provider (fees + timing)",
+    description=("Internal wallet ledger reconciled to the wallet provider report, "
+                 "allowing a provider fee and a settlement-date lag"),
+    mode="tolerance_timing",
+    recon_key="wallet_txn_id",
+    feeds=[
+        FeedSpec("wallet_internal", "Internal wallet ledger", date=True),
+        FeedSpec("wallet_provider", "Wallet provider report", date=True),
+    ],
+    tolerance=0.01,
+    fee_tolerance_pct=2.5,
+    date_window=3,
+))
+
+
 # ---------------------------------------------------------------------------
 # Template for the next rule (copy, adapt, register):
 #

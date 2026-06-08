@@ -122,11 +122,13 @@ for feed, col in zip(feeds, cols):
         opts = list(df.columns)
         key_col = st.selectbox(
             "Key column", opts,
-            index=_pick(opts, "order_id", "posting_id", "bank_ref", "journal_id"),
+            index=_pick(opts, "txn_id", "wallet_txn_id", "order_id", "posting_id",
+                        "bank_ref", "journal_id"),
             key=f"key_{role}")
         amt_col = st.selectbox(
             "Amount column", opts,
-            index=_pick(opts, "wallet_amount_utilized", "transaction_amount", "amount"),
+            index=_pick(opts, "wallet_amount_utilized", "gross_amount", "net_amount",
+                        "transaction_amount", "amount"),
             key=f"amt_{role}")
         narr_col = None
         if feed.narration:
@@ -134,9 +136,16 @@ for feed, col in zip(feeds, cols):
                 "Narration column", opts,
                 index=_pick(opts, "narration", "description"),
                 key=f"narr_{role}")
+        date_col = None
+        if feed.date:
+            date_col = st.selectbox(
+                "Date column", opts,
+                index=_pick(opts, "txn_date", "settle_date", "date", "value_date",
+                            "posting_date"),
+                key=f"date_{role}")
 
         sources[role] = DataSource(role, df, key_col, amt_col,
-                                   narration_column=narr_col)
+                                   narration_column=narr_col, date_column=date_col)
 
 # --- Run --------------------------------------------------------------------
 st.divider()

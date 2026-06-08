@@ -43,6 +43,39 @@ def sample_data(rule_id: str) -> dict:
         })
         return {"bank": bank, "gl": gl}
 
+    if rule_id == "R8":
+        # window=2d, fee allowance ~3%. Covers matched / timing / fee / genuine
+        # break / one-sided.
+        pg_txn = pd.DataFrame({
+            "txn_id":     ["T1", "T2", "T3", "T4", "T5"],
+            "gross_amount": [1000.00, 500.00, 750.00, 1200.00, 300.00],
+            "txn_date":   ["2026-06-01", "2026-06-01", "2026-06-02",
+                           "2026-06-03", "2026-06-04"],
+        })
+        pg_settlement = pd.DataFrame({
+            "txn_id":     ["T1", "T2", "T3", "T4", "T6"],
+            "net_amount": [980.00, 500.00, 750.00, 1000.00, 450.00],
+            "settle_date": ["2026-06-02", "2026-06-03", "2026-06-02",
+                            "2026-06-03", "2026-06-05"],
+        })
+        return {"pg_txn": pg_txn, "pg_settlement": pg_settlement}
+
+    if rule_id == "R7":
+        # window=3d, fee allowance ~2.5%.
+        wallet_internal = pd.DataFrame({
+            "wallet_txn_id": ["W1", "W2", "W3", "W4", "W5"],
+            "amount":        [2000.00, 1000.00, 500.00, 800.00, 250.00],
+            "date":          ["2026-06-01", "2026-06-01", "2026-06-02",
+                              "2026-06-02", "2026-06-04"],
+        })
+        wallet_provider = pd.DataFrame({
+            "wallet_txn_id": ["W1", "W2", "W3", "W4"],
+            "amount":        [1960.00, 1000.00, 500.00, 600.00],
+            "date":          ["2026-06-02", "2026-06-04", "2026-06-02",
+                              "2026-06-02"],
+        })
+        return {"wallet_internal": wallet_internal, "wallet_provider": wallet_provider}
+
     if rule_id == "R3":
         orders = pd.DataFrame({
             "order_id": ["O-1", "O-2", "O-3"],

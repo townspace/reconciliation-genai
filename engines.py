@@ -252,6 +252,129 @@ def semantic_recon(
     return result
 
 
+def tolerance_timing_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    left: DataSource,
+    right: DataSource,
+    tolerance: float = 0.01,
+    fee_tolerance: float = 0.0,
+    fee_tolerance_pct: float = 0.0,
+    date_window: int = 2,
+) -> ReconResult:
+    """
+    Mode 2 — tolerance + timing (R7, R8).
+
+    Key join where the settlement amount may differ from the transaction amount
+    by an allowed FEE and the value date may LAG by up to `date_window` days.
+    Decomposes the difference instead of dumping it into AMOUNT_MISMATCH:
+
+      MATCHED                  amounts equal (≤ tolerance) and same date
+      TIMING_DIFFERENCE        amounts equal, date lag within the window
+      FEE_DIFFERENCE           shortfall within the allowed fee, date within window
+      AMOUNT_MISMATCH          shortfall beyond the fee, or lag beyond the window
+      MISSING_IN_RIGHT/LEFT    one-sided
+
+    Money is compared with Decimal to avoid float-equality artefacts. The allowed
+    fee is `max(fee_tolerance, fee_tolerance_pct% of the left amount)`.
+    """
+    from decimal import Decimal
+
+    l = left.normalized_with_date()
+    r = right.normalized_with_date()
+    left_amt = f"{left.role}_amount"
+    right_amt = f"{right.role}_amount"
+    left_date = f"{left.role}_date"
+    right_date = f"{right.role}_date"
+
+    dup_left = l["recon_key"][l["recon_key"].duplicated()].unique().tolist()
+    dup_right = r["recon_key"][r["recon_key"].duplicated()].unique().tolist()
+
+    merged = l.merge(r, on="recon_key", how="outer", indicator=True)
+
+    def _dec(v) -> Optional[Decimal]:
+        if pd.isna(v):
+            return None
+        return Decimal(str(v))
+
+    tol = Decimal(str(tolerance))
+    fee_abs = Decimal(str(fee_tolerance))
+    fee_pct = Decimal(str(fee_tolerance_pct))
+
+    statuses, reasons = [], []
+    for _, row in merged.iterrows():
+        if row["_merge"] == "left_only":
+            statuses.append(MatchStatus.MISSING_IN_RIGHT.value)
+            reasons.append("no settlement record")
+            continue
+        if row["_merge"] == "right_only":
+            statuses.append(MatchStatus.MISSING_IN_LEFT.value)
+            reasons.append("no transaction record")
+            continue
+
+        lv, rv = _dec(row[left_amt]), _dec(row[right_amt])
+        diff = (lv - rv) if (lv is not None and rv is not None) else Decimal(0)
+        abs_diff = abs(diff)
+        fee_allow = max(fee_abs, (fee_pct / Decimal(100)) * (lv or Decimal(0)))
+
+        ld, rd = row.get(left_date), row.get(right_date)
+        if pd.isna(ld) or pd.isna(rd):
+            lag = 0
+        else:
+            lag = abs((pd.Timestamp(ld).normalize() - pd.Timestamp(rd).normalize()).days)
+
+        if abs_diff <= tol:                       # amounts effectively equal
+            if lag == 0:
+                statuses.append(MatchStatus.MATCHED.value)
+                reasons.append("")
+            elif lag <= date_window:
+                statuses.append(MatchStatus.TIMING_DIFFERENCE.value)
+                reasons.append(f"value-date lag {lag}d (≤ {date_window}d)")
+            else:
+                statuses.append(MatchStatus.AMOUNT_MISMATCH.value)
+                reasons.append(f"value-date lag {lag}d exceeds window {date_window}d")
+        elif diff > 0 and abs_diff <= fee_allow and lag <= date_window:
+            statuses.append(MatchStatus.FEE_DIFFERENCE.value)
+            reasons.append(f"fee {abs_diff} within allowance {fee_allow}"
+                           + (f", lag {lag}d" if lag else ""))
+        else:
+            statuses.append(MatchStatus.AMOUNT_MISMATCH.value)
+            if diff > 0:
+                reasons.append(f"shortfall {abs_diff} exceeds fee allowance {fee_allow}")
+            else:
+                reasons.append(f"settlement exceeds transaction by {abs_diff}")
+
+    merged["status"] = statuses
+    merged["break_reason"] = reasons
+    merged["difference"] = merged[left_amt].fillna(0) - merged[right_amt].fillna(0)
+    merged = merged.drop(columns=["_merge"])
+
+    breaks = merged[~merged["status"].isin(MATCHED_STATUSES)].copy()
+    counts = merged["status"].value_counts().to_dict()
+    summary = {
+        "total_keys": int(len(merged)),
+        "matched": int(counts.get(MatchStatus.MATCHED.value, 0)),
+        "timing_difference": int(counts.get(MatchStatus.TIMING_DIFFERENCE.value, 0)),
+        "fee_difference": int(counts.get(MatchStatus.FEE_DIFFERENCE.value, 0)),
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "missing_in_right": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "missing_in_left": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        "duplicate_keys_left": len(dup_left),
+        "duplicate_keys_right": len(dup_right),
+        f"{left.role}_total": round(float(l[left_amt].sum()), 2),
+        f"{right.role}_total": round(float(r[right_amt].sum()), 2),
+        "net_difference": round(float(merged["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=merged.reset_index(drop=True), summary=summary,
+    )
+
+
 def one_to_many_recon(
     rule_id: str,
     description: str,

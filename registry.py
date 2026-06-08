@@ -38,6 +38,7 @@ class FeedSpec:
     role: str
     hint: str = ""
     narration: bool = False     # does this feed carry a free-text narration?
+    date: bool = False          # does this feed carry a value/posting date?
 
 
 @dataclass
@@ -54,8 +55,9 @@ class RuleSpec:
     tolerance: float = 0.01
     amount_tolerance: Optional[float] = None   # semantic / tolerance_timing
     sim_threshold: Optional[float] = None      # semantic
+    fee_tolerance: Optional[float] = None       # tolerance_timing: absolute fee allowance
+    fee_tolerance_pct: Optional[float] = None   # tolerance_timing: % fee allowance
     date_window: Optional[int] = None          # tolerance_timing (calendar days)
-    date_map: Optional[Dict[str, str]] = None  # tolerance_timing: role -> date column
     group_by: Optional[str] = None             # aggregate_match: left date/batch column
     rate_map: Optional[Dict[str, str]] = None  # rate_validation: lookup + formula config
     notes: str = ""
@@ -139,11 +141,24 @@ def _one_to_many(spec: RuleSpec, sources: dict) -> ReconResult:
     )
 
 
+def _tolerance_timing(spec: RuleSpec, sources: dict) -> ReconResult:
+    from engines import tolerance_timing_recon
+    return tolerance_timing_recon(
+        rule_id=spec.id, description=spec.description, recon_key=spec.recon_key,
+        left=sources[spec.left_role], right=sources[spec.right_role],
+        tolerance=spec.tolerance,
+        fee_tolerance=spec.fee_tolerance or 0.0,
+        fee_tolerance_pct=spec.fee_tolerance_pct or 0.0,
+        date_window=spec.date_window if spec.date_window is not None else 2,
+    )
+
+
 # Dispatcher. New modes register themselves here in later phases.
 MODE_ENGINES: Dict[str, Callable[[RuleSpec, dict], ReconResult]] = {
     "exact_key": _exact_key,
     "semantic": _semantic,
     "one_to_many": _one_to_many,
+    "tolerance_timing": _tolerance_timing,
 }
 
 
