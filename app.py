@@ -123,14 +123,15 @@ for feed, col in zip(feeds, cols):
         opts = list(df.columns)
         key_col = st.selectbox(
             "Key column", opts,
-            index=_pick(opts, "txn_id", "wallet_txn_id", "order_id", "posting_id",
-                        "bank_ref", "journal_id", "charge_type", "merchant_id"),
+            index=_pick(opts, "batch_id", "deposit_batch", "remittance_id", "txn_id",
+                        "wallet_txn_id", "order_id", "posting_id", "bank_ref",
+                        "journal_id", "charge_type", "merchant_id"),
             key=f"key_{role}")
         amt_col = st.selectbox(
             "Amount column", opts,
             index=_pick(opts, "wallet_amount_utilized", "gross_amount", "net_amount",
-                        "actual_charge", "actual_commission", "rate_pct",
-                        "transaction_amount", "amount"),
+                        "credit_amount", "actual_charge", "actual_commission",
+                        "rate_pct", "transaction_amount", "amount"),
             key=f"amt_{role}")
         narr_col = None
         if feed.narration:

@@ -163,6 +163,65 @@ register(RuleSpec(
 ))
 
 
+# ===========================================================================
+# Mode 4 — N:1 aggregation / bank reco (group + sum -> one bank line)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# R12  —  Settlement batch vs bank statement (AGGREGATE_MATCH)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R12",
+    label="R12 — Settlement batch vs bank credit (N:1)",
+    description=("Many settlement postings in a batch roll up to a single bank "
+                 "credit; group by batch and match the total to the bank line"),
+    mode="aggregate_match",
+    recon_key="batch_id",
+    feeds=[
+        FeedSpec("settlement", "Settlement postings (many per batch)"),
+        FeedSpec("bank", "Bank statement (one credit per batch)"),
+    ],
+    group_by="batch_id",
+    tolerance=0.01,
+))
+
+# ---------------------------------------------------------------------------
+# R9  —  Cash deposit + CMS vs bank statement (AGGREGATE_MATCH)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R9",
+    label="R9 — Cash/CMS deposits vs bank credit (N:1)",
+    description=("Cash deposit / CMS collection slips grouped by deposit batch and "
+                 "matched to the single bank credit for that batch"),
+    mode="aggregate_match",
+    recon_key="deposit_batch",
+    feeds=[
+        FeedSpec("cms", "Cash/CMS deposit slips (many per batch)"),
+        FeedSpec("bank", "Bank statement (one credit per batch)"),
+    ],
+    group_by="deposit_batch",
+    tolerance=0.01,
+))
+
+# ---------------------------------------------------------------------------
+# R10  —  Channel-partner txns vs bank statement (AGGREGATE_MATCH)
+# ---------------------------------------------------------------------------
+register(RuleSpec(
+    id="R10",
+    label="R10 — Channel-partner txns vs bank credit (N:1)",
+    description=("Channel-partner transactions grouped by remittance batch and "
+                 "matched to the single bank remittance credit"),
+    mode="aggregate_match",
+    recon_key="remittance_id",
+    feeds=[
+        FeedSpec("channel_txn", "Channel-partner txns (many per remittance)"),
+        FeedSpec("bank", "Bank statement (one credit per remittance)"),
+    ],
+    group_by="remittance_id",
+    tolerance=0.01,
+))
+
+
 # ---------------------------------------------------------------------------
 # Template for the next rule (copy, adapt, register):
 #

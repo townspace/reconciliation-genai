@@ -145,6 +145,15 @@ def _one_to_many(spec: RuleSpec, sources: dict) -> ReconResult:
     )
 
 
+def _aggregate_match(spec: RuleSpec, sources: dict) -> ReconResult:
+    from engines import aggregate_match_recon
+    return aggregate_match_recon(
+        rule_id=spec.id, description=spec.description, recon_key=spec.recon_key,
+        many=sources[spec.left_role], bank=sources[spec.right_role],
+        tolerance=spec.tolerance,
+    )
+
+
 def _rate_validation(spec: RuleSpec, sources: dict) -> ReconResult:
     from engines import rate_validation_recon
     return rate_validation_recon(
@@ -173,6 +182,7 @@ MODE_ENGINES: Dict[str, Callable[[RuleSpec, dict], ReconResult]] = {
     "one_to_many": _one_to_many,
     "tolerance_timing": _tolerance_timing,
     "rate_validation": _rate_validation,
+    "aggregate_match": _aggregate_match,
 }
 
 

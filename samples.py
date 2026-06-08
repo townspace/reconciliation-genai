@@ -105,6 +105,40 @@ def sample_data(rule_id: str) -> dict:
         return {"channel_partner": channel_partner,
                 "commission_master": commission_master}
 
+    if rule_id == "R12":
+        # B1 matches; B2 partial (short 50); B3 unallocated group; B4 unmatched bank.
+        settlement = pd.DataFrame({
+            "batch_id": ["B1", "B1", "B1", "B2", "B2", "B3", "B3"],
+            "amount":   [100.00, 250.00, 150.00, 300.00, 200.00, 400.00, 100.00],
+        })
+        bank = pd.DataFrame({
+            "batch_id":      ["B1", "B2", "B4"],
+            "credit_amount": [500.00, 450.00, 700.00],
+        })
+        return {"settlement": settlement, "bank": bank}
+
+    if rule_id == "R9":
+        cms = pd.DataFrame({
+            "deposit_batch": ["D1", "D1", "D2", "D2", "D3"],
+            "amount":        [1000.00, 500.00, 750.00, 750.00, 300.00],
+        })
+        bank = pd.DataFrame({
+            "deposit_batch": ["D1", "D2", "D4"],
+            "credit_amount": [1500.00, 1500.00, 900.00],
+        })
+        return {"cms": cms, "bank": bank}
+
+    if rule_id == "R10":
+        channel_txn = pd.DataFrame({
+            "remittance_id": ["R1", "R1", "R1", "R2", "R3"],
+            "amount":        [200.00, 300.00, 500.00, 1200.00, 450.00],
+        })
+        bank = pd.DataFrame({
+            "remittance_id": ["R1", "R2"],
+            "credit_amount": [1000.00, 1150.00],
+        })
+        return {"channel_txn": channel_txn, "bank": bank}
+
     if rule_id == "R3":
         orders = pd.DataFrame({
             "order_id": ["O-1", "O-2", "O-3"],

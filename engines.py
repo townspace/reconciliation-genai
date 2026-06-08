@@ -252,6 +252,93 @@ def semantic_recon(
     return result
 
 
+def aggregate_match_recon(
+    rule_id: str,
+    description: str,
+    recon_key: str,
+    many: DataSource,
+    bank: DataSource,
+    tolerance: float = 0.01,
+) -> ReconResult:
+    """
+    Mode 4 — N:1 aggregation / bank reco (R9, R10, R12).
+
+    Group the `many` feed by its key (the settlement batch / value date used as
+    the recon key), sum the amounts, then match each group total to the single
+    `bank` line with the same key.
+
+      AGGREGATE_MATCH    group total equals the bank line (± tolerance)
+      AMOUNT_MISMATCH    group and bank line exist but totals differ (partial)
+      MISSING_IN_RIGHT   transaction group with no bank line (unallocated group)
+      MISSING_IN_LEFT    bank line with no transaction group (unmatched credit)
+
+    Money is summed with Decimal to avoid float drift across many rows.
+    """
+    from decimal import Decimal
+
+    l = many.normalized()
+    r = bank.normalized()
+    many_amt = f"{many.role}_amount"
+    bank_amt = f"{bank.role}_amount"
+
+    dup_bank = r["recon_key"][r["recon_key"].duplicated()].unique().tolist()
+
+    # Aggregate the many-side by key (Decimal sum), keeping a member count.
+    grouped = (l.groupby("recon_key")[many_amt]
+               .apply(lambda s: float(sum(Decimal(str(v)) for v in s)))
+               .reset_index())
+    sizes = l.groupby("recon_key").size().reset_index(name="group_size")
+    grouped = grouped.merge(sizes, on="recon_key")
+
+    merged = grouped.merge(r, on="recon_key", how="outer", indicator=True)
+    tol = Decimal(str(tolerance))
+
+    statuses, reasons = [], []
+    for _, row in merged.iterrows():
+        if row["_merge"] == "left_only":
+            statuses.append(MatchStatus.MISSING_IN_RIGHT.value)
+            reasons.append("transaction group has no bank line (unallocated)")
+        elif row["_merge"] == "right_only":
+            statuses.append(MatchStatus.MISSING_IN_LEFT.value)
+            reasons.append("bank line has no transaction group (unmatched credit)")
+        else:
+            diff = Decimal(str(row[many_amt])) - Decimal(str(row[bank_amt]))
+            if abs(diff) <= tol:
+                statuses.append(MatchStatus.AGGREGATE_MATCH.value)
+                reasons.append("")
+            else:
+                statuses.append(MatchStatus.AMOUNT_MISMATCH.value)
+                reasons.append(f"group total {row[many_amt]} vs bank {row[bank_amt]} "
+                               f"(off by {float(diff):+.2f})")
+
+    merged["status"] = statuses
+    merged["break_reason"] = reasons
+    merged["group_size"] = merged["group_size"].fillna(0).astype(int)
+    merged["difference"] = merged[many_amt].fillna(0) - merged[bank_amt].fillna(0)
+    merged = merged.drop(columns=["_merge"])
+
+    breaks = merged[~merged["status"].isin(MATCHED_STATUSES)].copy()
+    counts = merged["status"].value_counts().to_dict()
+    summary = {
+        "total_groups": int(len(merged)),
+        "aggregate_matched": int(counts.get(MatchStatus.AGGREGATE_MATCH.value, 0)),
+        "amount_mismatch": int(counts.get(MatchStatus.AMOUNT_MISMATCH.value, 0)),
+        "unallocated_groups": int(counts.get(MatchStatus.MISSING_IN_RIGHT.value, 0)),
+        "unmatched_bank_lines": int(counts.get(MatchStatus.MISSING_IN_LEFT.value, 0)),
+        "total_breaks": int(len(breaks)),
+        "duplicate_bank_keys": len(dup_bank),
+        f"{many.role}_total": round(float(l[many_amt].sum()), 2),
+        f"{bank.role}_total": round(float(r[bank_amt].sum()), 2),
+        "net_difference": round(float(merged["difference"].sum()), 2),
+    }
+
+    return ReconResult(
+        rule_id=rule_id, description=description, recon_type=ReconType.TRANSACTIONAL,
+        recon_key=recon_key, breaks=breaks.reset_index(drop=True),
+        detail=merged.reset_index(drop=True), summary=summary,
+    )
+
+
 def rate_validation_recon(
     rule_id: str,
     description: str,
