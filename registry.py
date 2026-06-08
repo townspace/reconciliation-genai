@@ -147,10 +147,46 @@ MODE_ENGINES: Dict[str, Callable[[RuleSpec, dict], ReconResult]] = {
 }
 
 
-def dispatch(spec: RuleSpec, sources: dict) -> ReconResult:
-    """Validate inputs and run the engine for this rule's mode."""
+# Generalised result columns (Phase 2). Every mode produces these so the UI and
+# later pipeline have a stable schema; a mode leaves the ones it does not use
+# empty, and the UI hides all-empty columns.
+GENERALISED_COLUMNS = [
+    "expected_amount",   # rate_validation: computed from a rate master
+    "actual_amount",     # rate_validation / tolerance_timing: observed value
+    "break_reason",      # human-readable decomposition of a break
+    "computed_from",     # provenance note (e.g. "base x rate")
+]
+
+
+def _ensure_schema(result: ReconResult) -> ReconResult:
+    """Add the generalised columns (empty) to detail/breaks if a mode omitted them.
+
+    Uses pandas.NA so the UI's drop-empty logic hides untouched columns; existing
+    columns (recon_key, status, difference, <role>_amount, ...) are left intact,
+    so exact_key output is unchanged.
+    """
+    import pandas as pd
+    for frame_name in ("detail", "breaks"):
+        df = getattr(result, frame_name)
+        if df is None or not len(df.columns):
+            continue
+        for col in GENERALISED_COLUMNS:
+            if col not in df.columns:
+                df[col] = pd.NA
+    return result
+
+
+def dispatch(spec: RuleSpec, sources: dict, tolerance: Optional[float] = None) -> ReconResult:
+    """Validate inputs and run the engine for this rule's mode.
+
+    `tolerance` (if given) overrides the rule's configured tolerance for this run,
+    so the UI can expose a tolerance control without mutating the registry.
+    """
     _require(spec, sources)
+    if tolerance is not None:
+        from dataclasses import replace
+        spec = replace(spec, tolerance=tolerance)
     engine = MODE_ENGINES.get(spec.mode)
     if engine is None:
         raise ValueError(f"No engine registered for mode '{spec.mode}'")
-    return engine(spec, sources)
+    return _ensure_schema(engine(spec, sources))

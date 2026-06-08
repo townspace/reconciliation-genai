@@ -30,6 +30,17 @@ from wrapper import ReconWrapper
 from ai.client import OpenAIClient
 from samples import sample_data
 
+def _display(df):
+    """Hide columns that are entirely empty/NA so a mode's unused generalised
+    columns don't clutter the table (Phase 2: extra columns only when populated)."""
+    if df is None or not len(df):
+        return df
+    keep = [c for c in df.columns
+            if not df[c].isna().all()
+            and not (df[c].astype(str).str.strip() == "").all()]
+    return df[keep]
+
+
 def _pick(options, *preferred):
     """Default a selectbox to the first preferred column that exists."""
     for p in preferred:
@@ -129,6 +140,14 @@ for feed, col in zip(feeds, cols):
 
 # --- Run --------------------------------------------------------------------
 st.divider()
+# Amount tolerance. Exact-key rules default to 0 (strict equality), matching the
+# original behaviour; other modes default to their configured tolerance.
+default_tol = 0.0 if spec.mode == "exact_key" else float(spec.tolerance or 0.0)
+tol = st.number_input(
+    "Amount tolerance (absolute)", min_value=0.0, value=default_tol, step=0.01,
+    format="%.2f",
+    help="Amounts within this absolute difference count as matching. 0 = strict "
+         "equality (exact-key default).")
 run = st.button("▶ Run reconciliation", type="primary", disabled=not ready,
                 width="stretch")
 if not ready:
@@ -139,7 +158,7 @@ if run and ready:
     with st.spinner("Reconciling" + (" and enriching with AI…" if client else "…")):
         try:
             result = wrapper.run_rule(rule_id, sources, enrich=bool(client),
-                                      client=client)
+                                      client=client, tolerance=tol)
         except Exception as exc:  # surface input/config errors plainly
             st.error(f"Run failed: {exc}")
             st.stop()
@@ -160,11 +179,11 @@ if run and ready:
         ["Detail", "Breaks", "Draft journals", "Anomalies"])
 
     with tab_detail:
-        st.dataframe(result.detail, width="stretch")
+        st.dataframe(_display(result.detail), width="stretch")
 
     with tab_breaks:
         if len(result.breaks):
-            st.dataframe(result.breaks, width="stretch")
+            st.dataframe(_display(result.breaks), width="stretch")
         else:
             st.success("No breaks — everything reconciled. ✅")
 
