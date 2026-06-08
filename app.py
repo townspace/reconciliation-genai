@@ -30,35 +30,6 @@ from wrapper import ReconWrapper
 from ai.client import OpenAIClient
 from samples import sample_data
 
-# ---------------------------------------------------------------------------
-# Per-rule UI metadata: which roles a rule needs, and whether each role wants a
-# narration column. Keeps the dynamic form generic across rules.
-# ---------------------------------------------------------------------------
-RULE_UI = {
-    "R1": {
-        "label": "R1 — Exact match (OMS/POS wallet vs internal wallet)",
-        "roles": {
-            "oms_pos": {"narration": False, "hint": "Primary feed (e.g. OMS/POS export)"},
-            "wallet":  {"narration": False, "hint": "Secondary feed (e.g. internal wallet)"},
-        },
-    },
-    "R2": {
-        "label": "R2 — Semantic match (bank narration vs GL description)",
-        "roles": {
-            "bank": {"narration": True, "hint": "Bank statement lines"},
-            "gl":   {"narration": True, "hint": "GL postings"},
-        },
-    },
-    "R3": {
-        "label": "R3 — One-to-many (split settlements summing to one order)",
-        "roles": {
-            "oms_pos": {"narration": False, "hint": "Single side (orders)"},
-            "wallet":  {"narration": False, "hint": "Split side (postings)"},
-        },
-    },
-}
-
-
 def _pick(options, *preferred):
     """Default a selectbox to the first preferred column that exists."""
     for p in preferred:
@@ -102,12 +73,13 @@ wrapper = ReconWrapper()
 # --- Rule selection ---------------------------------------------------------
 rule_id = st.selectbox(
     "Reconciliation rule",
-    options=list(RULE_UI.keys()),
-    format_func=lambda r: RULE_UI[r]["label"],
+    options=wrapper.list_rules(),
+    format_func=lambda r: wrapper.rules[r].label,
 )
+spec = wrapper.rules[rule_id]
 st.markdown(f"> {wrapper.describe(rule_id).splitlines()[-1].strip()}")
 
-roles = RULE_UI[rule_id]["roles"]
+feeds = spec.feeds          # list of FeedSpec (role, hint, narration)
 use_sample = st.toggle("Use built-in sample data", value=True,
                        help="Turn off to upload your own CSVs.")
 samples = sample_data(rule_id) if use_sample else {}
@@ -115,12 +87,13 @@ samples = sample_data(rule_id) if use_sample else {}
 # --- Per-role inputs --------------------------------------------------------
 sources: dict[str, DataSource] = {}
 ready = True
-cols = st.columns(len(roles))
+cols = st.columns(len(feeds))
 
-for (role, meta), col in zip(roles.items(), cols):
+for feed, col in zip(feeds, cols):
+    role = feed.role
     with col:
         st.subheader(role)
-        st.caption(meta["hint"])
+        st.caption(feed.hint)
         df = None
         if use_sample:
             df = samples[role]
@@ -145,7 +118,7 @@ for (role, meta), col in zip(roles.items(), cols):
             index=_pick(opts, "wallet_amount_utilized", "transaction_amount", "amount"),
             key=f"amt_{role}")
         narr_col = None
-        if meta["narration"]:
+        if feed.narration:
             narr_col = st.selectbox(
                 "Narration column", opts,
                 index=_pick(opts, "narration", "description"),
