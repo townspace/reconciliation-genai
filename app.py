@@ -53,8 +53,8 @@ def _pick(options, *preferred):
 # ---------------------------------------------------------------------------
 # Page
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Reconciliation Wrap model", page_icon="🧮", layout="wide")
-st.title("🧮 Reconciliation Wrap model")
+st.set_page_config(page_title="Recon.AI", page_icon="🧮", layout="wide")
+st.title("🧮 Recon.AI")
 st.caption("Match two feeds, then let AI explain the breaks, draft journals, and flag anomalies.")
 
 # --- Sidebar: credentials + model ------------------------------------------
