@@ -115,6 +115,9 @@ def classify_breaks(result: ReconResult, client: Optional[LLMClient] = None,
         return result
 
     amt_cols = _amount_cols(breaks)
+    # coerce amount cols to numeric — outer-merge NaN fill can revert dtype to object
+    for c in amt_cols + (["difference"] if "difference" in breaks.columns else []):
+        breaks[c] = pd.to_numeric(breaks[c], errors="coerce")
     diffs = breaks.get("difference")
     typical = float(diffs.abs().median()) if diffs is not None and len(diffs) else 0.0
     dup_amounts = set()
