@@ -96,6 +96,7 @@ class DataSource:
         out = self.df[[self.key_column, self.amount_column]].copy()
         out.columns = ["recon_key", f"{self.role}_amount"]
         out["recon_key"] = out["recon_key"].astype(str).str.strip()
+        out[f"{self.role}_amount"] = pd.to_numeric(out[f"{self.role}_amount"], errors="coerce")
         return out
 
     def normalized_with_date(self) -> pd.DataFrame:
